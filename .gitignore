@@ -1,0 +1,5 @@
+detections_val2014__results.json
+runs/**
+*.jpg
+weights/**
+*__pycache__*

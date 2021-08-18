@@ -469,6 +469,8 @@ def compute_loss(p, targets, model):  # predictions, targets, model
         n = b.shape[0]  # number of targets
         if n:
             nt += n  # cumulative targets
+            # print("pi")
+            # print(pi)
             ps = pi[b, a, gj, gi]  # prediction subset corresponding to targets
 
             # Regression
@@ -485,8 +487,14 @@ def compute_loss(p, targets, model):  # predictions, targets, model
 
             # Classification
             if model.nc > 1:  # cls loss (only if multiple classes)
+                # print("ps")
+                # print(ps.size(), type(ps.size()))
+                # ipt_size = (ps.size()[0], ps.size()[1]-5)
+                # t = torch.full(ipt_size, cn, dtype=ps.dtype, layout=ps.layout, device=device)
                 t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
                 t[range(n), tcls[i]] = cp
+                # print("ps")
+                # print(ps)
                 lcls += BCEcls(ps[:, 5:], t)  # BCE
 
             # Append targets to text file
@@ -887,8 +895,8 @@ def fitness(x):
 
 def output_to_target(output, width, height):
     # Convert model output to target format [batch_id, class_id, x, y, w, h, conf]
-    if isinstance(output, torch.Tensor):
-        output = output.cpu().numpy()
+    if isinstance(output[0], torch.Tensor):
+        output = [x.cpu().numpy() for x in output]
 
     targets = []
     for i, o in enumerate(output):
@@ -903,7 +911,6 @@ def output_to_target(output, width, height):
                 cls = int(pred[5])
 
                 targets.append([i, cls, x, y, w, h, conf])
-
     return np.array(targets)
 
 

@@ -5,6 +5,8 @@ import os
 import shutil
 from pathlib import Path
 
+import torchextractor as tx
+
 import numpy as np
 import torch
 import yaml
@@ -85,12 +87,20 @@ def test(data,
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
+    
+    # Print Model
+    # for name, layer in model.named_modules():
+        # print(name, layer)
+    
+    # Output Features
+    model_extractor = tx.Extractor(model, ["module_list.172.Conv2"])
 
     # Dataloader
     if not training:
         img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
         _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
         path = data['test'] if opt.task == 'test' else data['val']  # path to val/test images
+        print("Data path: ", path)
         dataloader = create_dataloader(path, imgsz, batch_size, 32, opt,
                                        hyp=None, augment=False, cache=False, pad=0.5, rect=True)[0]
 
@@ -98,7 +108,8 @@ def test(data,
     try:
         names = model.names if hasattr(model, 'names') else model.module.names
     except:
-        names = load_classes(opt.names)
+        names = data['names']
+        # names = load_classes(opt.data)
     coco91class = coco80_to_coco91_class()
     s = ('%20s' + '%12s' * 6) % ('Class', 'Images', 'Targets', 'P', 'R', 'mAP@.5', 'mAP@.5:.95')
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
@@ -116,7 +127,11 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            inf_out, train_out = model(img, augment=augment)  # inference and training outputs
+            model_output, features =  model_extractor(img, augment=augment)  # inference and training outputs
+            inf_out, train_out = model_output
+            feature_shapes = {name: f.shape for name, f in features.items()}
+            # print(feature_shapes)
+            # print(list(features.values())[0][0][0])
             t0 += time_synchronized() - t
 
             # Compute loss
@@ -127,6 +142,9 @@ def test(data,
             t = time_synchronized()
             output = non_max_suppression(inf_out, conf_thres=conf_thres, iou_thres=iou_thres, merge=merge)
             t1 += time_synchronized() - t
+            
+            # print(inf_out.shape, output[0].shape)
+            # print(output[0])
 
         # Statistics per image
         for si, pred in enumerate(output):
@@ -162,7 +180,7 @@ def test(data,
                 box = xyxy2xywh(box)  # xywh
                 box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
                 for p, b in zip(pred.tolist(), box.tolist()):
-                    jdict.append({'image_id': int(image_id) if image_id.isnumeric() else image_id,
+                    jdict.append({'image_id': int(image_id) if image_id.split('_')[-1].isnumeric() else image_id,
                                   'category_id': coco91class[int(p[5])],
                                   'bbox': [round(x, 3) for x in b],
                                   'score': round(p[4], 5)})
@@ -217,6 +235,7 @@ def test(data,
 
     # Print results
     pf = '%20s' + '%12.3g' * 6  # print format
+    print(s)
     print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
 
     # Print results per class
@@ -231,27 +250,27 @@ def test(data,
 
     # Save JSON
     if save_json and len(jdict):
-        f = 'detections_val2017_%s_results.json' % \
+        f = 'detections_val2014_%s_results.json' % \
             (weights.split(os.sep)[-1].replace('.pt', '') if isinstance(weights, str) else '')  # filename
         print('\nCOCO mAP with pycocotools... saving %s...' % f)
         with open(f, 'w') as file:
             json.dump(jdict, file)
 
-        try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
-            from pycocotools.coco import COCO
-            from pycocotools.cocoeval import COCOeval
+        # try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
 
-            imgIds = [int(Path(x).stem) for x in dataloader.dataset.img_files]
-            cocoGt = COCO(glob.glob('../coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
-            cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
-            cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
-            cocoEval.params.imgIds = imgIds  # image IDs to evaluate
-            cocoEval.evaluate()
-            cocoEval.accumulate()
-            cocoEval.summarize()
-            map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
-        except Exception as e:
-            print('ERROR: pycocotools unable to run: %s' % e)
+        imgIds = [int(Path(x).stem.split('_')[-1]) for x in dataloader.dataset.img_files]
+        cocoGt = COCO(glob.glob('/storage/che011/ICT/fairseq-image-captioning/ms-coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
+        cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
+        cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+        cocoEval.params.imgIds = imgIds  # image IDs to evaluate
+        cocoEval.evaluate()
+        cocoEval.accumulate()
+        cocoEval.summarize()
+        map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+        # except Exception as e:
+            # print('ERROR: pycocotools unable to run: %s' % e)
 
     # Return results
     model.float()  # for training

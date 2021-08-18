@@ -1,0 +1,27 @@
+# train and val datasets (image directory or *.txt file with image paths)
+train: /storage/che011/BUA/bottom-up-attention3/data/genome/train_cleared_empty.txt
+val: /storage/che011/BUA/bottom-up-attention3/data/genome/val_cleared_empty.txt
+test: /storage/che011/BUA/bottom-up-attention3/data/genome/test_cleared_empty.txt
+
+# number of classes
+nc: 188
+
+# class names
+names: [person,bicycle,car,motorbike,aeroplane,bus,train,truck,army truck,boat,traffic light,fire hydrant,
+        stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe,backpack,
+        umbrella,handbag,tie,suitcase,frisbee,sports ball,skis,snowboard,kite,baseball bat,baseball glove,
+        skateboard,surfboard,tennis racket,bottle,wine glass,cup,fork,knife,spoon,bowl,plate,banana,apple,
+        sandwich,orange,broccoli,carrot,hot dog,pizza,donut,cake,chair,sofa,pottedplant,bed,table,toilet,
+        tvmonitor,laptop,mouse,remote,keyboard,cell phone,microwave,oven,toaster,sink,refrigerator,book,
+        clock,vase,scissors,hair drier,toothbrush,bathroom,kitchen,tennis court,beach,field,castle,runway,
+        highway,mountain,room,church,counter,harbor,pool,shop,airport,city,street,park,pen,valley,lawn,
+        hill,forest,lake,desert,playground,patio,terminal,restroom,shorts,jeans,army uniform,soldier uniform,
+        navy uniform,sailor uniform,chef's uniform,t-shirt,athletic shirt,shirt,pants,skirt,swimsuit,
+        sports uniform,firefighter uniform,officer's uniform,uniform,necklace,shin guard,wristband,
+        althletic suit,astronaut suit,suit,headband,rain coat,coat,jacket,costume,undershirt,life jacket,
+        sneakers,snowsuit,pajamas,blouse,gloves,earring,jersey,face mask,pilot uniform,police uniform,
+        umpire uniform,navy uniform,maid uniform,ceremonial uniforms,soldier's hat,batting helmet,trolley,
+        mailbox,flag,bridge,hut,building,stadium,engine,cones,license plate,jeep,house,tracks,grafitti,lane,
+        river,flame,tag,logo,monument,crosswalk,ladder,stairs,cockpit,fountain,microphone,gun,trashbin,
+        goatee,mustache,beard]
+        

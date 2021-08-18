@@ -69,6 +69,30 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
                                              pin_memory=True,
                                              collate_fn=LoadImagesAndLabels.collate_fn)
     return dataloader, dataset
+    
+def create_dataloader_custom(path, imgsz, batch_size, stride, single_cls, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
+                      local_rank=-1, world_size=1):
+    # Make sure only the first process in DDP process the dataset first, and the following others can use the cache.
+    with torch_distributed_zero_first(local_rank):
+        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+                                      augment=augment,  # augment images
+                                      hyp=hyp,  # augmentation hyperparameters
+                                      rect=rect,  # rectangular training
+                                      cache_images=cache,
+                                      single_cls=single_cls,
+                                      stride=int(stride),
+                                      pad=pad)
+
+    batch_size = min(batch_size, len(dataset))
+    nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, 8])  # number of workers
+    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset) if local_rank != -1 else None
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=batch_size,
+                                             num_workers=nw,
+                                             sampler=train_sampler,
+                                             pin_memory=True,
+                                             collate_fn=LoadImagesAndLabels.collate_fn)
+    return dataloader, dataset
 
 
 class LoadImages:  # for inference
@@ -293,6 +317,10 @@ class LoadStreams:  # multiple IP or RTSP cameras
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0):
+        self.karpathy = False
+        self.VG = False
+        VG_data_path = '/storage/che011/BUA/VGdata/'
+        karpathy_path = '/storage/che011/ICT/fairseq-image-captioning/ms-coco/images/'
         try:
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
@@ -301,17 +329,30 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if os.path.isfile(p):  # file
                     with open(p, 'r') as t:
                         t = t.read().splitlines()
-                        f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
+                        new_t = []
+                        if t[0].startswith('VG') or 'val2014/' in t[0].strip() or 'train2014/' in t[0].strip():
+                            for x in t:
+                                if x.startswith('VG'):
+                                    self.VG = True
+                                    new_t.append(os.path.join(VG_data_path,x.split(' ')[0]))
+                                elif 'val2014/' in x.strip() or 'train2014/' in x.strip():
+                                    self.karpathy = True
+                                    new_t.append(os.path.join(karpathy_path ,x.split(' ')[0]))
+                            f = new_t
+                        else:
+                            f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
                 elif os.path.isdir(p):  # folder
                     f += glob.iglob(p + os.sep + '*.*')
                 else:
                     raise Exception('%s does not exist' % p)
             self.img_files = sorted(
                 [x.replace('/', os.sep) for x in f if os.path.splitext(x)[-1].lower() in img_formats])
+            print(self.img_files[:2])
         except Exception as e:
             raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
 
         n = len(self.img_files)
+        print(n, ' images found')
         assert n > 0, 'No images found in %s. See %s' % (path, help_url)
         bi = np.floor(np.arange(n) / batch_size).astype(np.int)  # batch index
         nb = bi[-1] + 1  # number of batches
@@ -328,11 +369,16 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.stride = stride
 
         # Define labels
-        self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
+        if self.karpathy or self.VG:
+            self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt').replace('/val2014','').replace('/train2014','').replace('VG_100K_2', 'labels').replace('VG_100K','labels') for x in self.img_files]
+        else:
+            self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
                             self.img_files]
-
         # Check cache
-        cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
+        if self.karpathy and self.VG:
+            cache_path = 'data/labels.cache'
+        else:
+            cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path):
             cache = torch.load(cache_path)  # load
             if cache['hash'] != get_hash(self.label_files + self.img_files):  # dataset changed
@@ -378,9 +424,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             if l.shape[0]:
                 assert l.shape[1] == 5, '> 5 label columns: %s' % file
                 assert (l >= 0).all(), 'negative labels: %s' % file
+                l[:,1:] = np.where(l[:,1:]>1,1.,l[:,1:])
                 assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels: %s' % file
                 if np.unique(l, axis=0).shape[0] < l.shape[0]:  # duplicate rows
-                    nd += 1  # print('WARNING: duplicate rows in %s' % self.label_files[i])  # duplicate rows
+                    nd += 1  
+                    print('WARNING: duplicate rows in %s' % self.label_files[i])  # duplicate rows
                 if single_cls:
                     l[:, 0] = 0  # force dataset into single-class mode
                 self.labels[i] = l
@@ -417,8 +465,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                         b[[1, 3]] = np.clip(b[[1, 3]], 0, h)
                         assert cv2.imwrite(f, img[b[1]:b[3], b[0]:b[2]]), 'Failure extracting classifier boxes'
             else:
-                ne += 1  # print('empty labels for image %s' % self.img_files[i])  # file empty
-                # os.system("rm '%s' '%s'" % (self.img_files[i], self.label_files[i]))  # remove
+                ne += 1  
+                print('empty labels for image %s' % self.img_files[i])  # file empty
+                # os.system("mv '%s' '%s'" % (self.img_files[i], self.label_files[i]))  # remove
 
             pbar.desc = 'Scanning labels %s (%g found, %g missing, %g empty, %g duplicate, for %g images)' % (
                 cache_path, nf, nm, ne, nd, n)
@@ -426,6 +475,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             s = 'WARNING: No labels found in %s. See %s' % (os.path.dirname(file) + os.sep, help_url)
             print(s)
             assert not augment, '%s. Can not train without labels.' % s
+            
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
@@ -553,7 +603,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Convert
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
-
+        
         return torch.from_numpy(img), labels_out, self.img_files[index], shapes
 
     @staticmethod
