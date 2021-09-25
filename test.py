@@ -2,10 +2,12 @@ import argparse
 import glob
 import json
 import os
+import base64
 import shutil
 from pathlib import Path
 
 import torchextractor as tx
+import torch.nn.functional as F
 
 import numpy as np
 import torch
@@ -45,6 +47,9 @@ def test(data,
          save_dir='',
          merge=False,
          save_txt=False):
+         
+    extract_features = True
+         
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -93,13 +98,13 @@ def test(data,
         # print(name, layer)
     
     # Output Features
-    model_extractor = tx.Extractor(model, ["module_list.172.Conv2"])
+    model_extractor = tx.Extractor(model, ["module_list.172.Conv2d"])
 
     # Dataloader
     if not training:
         img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
         _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
-        path = data['test'] if opt.task == 'test' else data['val']  # path to val/test images
+        path = data[opt.task] #if opt.task == 'test' else data['val']  # path to val/test images
         print("Data path: ", path)
         dataloader = create_dataloader(path, imgsz, batch_size, 32, opt,
                                        hyp=None, augment=False, cache=False, pad=0.5, rect=True)[0]
@@ -115,11 +120,19 @@ def test(data,
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class = [], [], [], []
+    # features_list = []
+    if extract_features:
+        features_dict = []
+    # feature_dir_name = 'valid-features-grid' if opt.task == 'val' else '%s-features-grid' % opt.task
+    # feature_task_dir = '/storage/che011/ICT/fairseq-image-captioning/output_yolov4/'+feature_dir_name
+    if os.path.isdir(
     for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
+        # img = F.interpolate(img, size=(imgsz, imgsz), mode='bilinear', align_corners=False)
+        # print('img_shape: ', img.shape)
         nb, _, height, width = img.shape  # batch size, channels, height, width
         whwh = torch.Tensor([width, height, width, height]).to(device)
 
@@ -127,11 +140,13 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            model_output, features =  model_extractor(img, augment=augment)  # inference and training outputs
-            inf_out, train_out = model_output
-            feature_shapes = {name: f.shape for name, f in features.items()}
-            # print(feature_shapes)
-            # print(list(features.values())[0][0][0])
+            model_output, features =  model_extractor(img, augment=augment)  
+            inf_out, train_out = model_output # inference and training outputs
+            if extract_features:
+                assert len(list(features)) == 1
+                features = list(features.values())[0].flatten()
+                # features_list.append(features)
+                
             t0 += time_synchronized() - t
 
             # Compute loss
@@ -143,8 +158,9 @@ def test(data,
             output = non_max_suppression(inf_out, conf_thres=conf_thres, iou_thres=iou_thres, merge=merge)
             t1 += time_synchronized() - t
             
-            # print(inf_out.shape, output[0].shape)
-            # print(output[0])
+            # print('paths:', paths)
+            # print('inf shape: ', inf_out.shape, 'output shape:', len(output))
+        
 
         # Statistics per image
         for si, pred in enumerate(output):
@@ -170,114 +186,132 @@ def test(data,
 
             # Clip boxes to image bounds
             clip_coords(pred, (height, width))
+            
+            if extract_features:
+                print('pred shape: ', pred[:, :4].shape)
+                print('features shape: ', features.shape)
+                features_info = {
+                    'image_id': int(os.path.splitext(os.path.basename(paths[0]))[0].replace('COCO_train2014_','').replace('COCO_val2014_','')),
+                    'image_h': height,
+                    'image_w': width,
+                    'num_boxes' : pred.shape[0],
+                    'boxes': base64.b64encode(pred[:, :4].detach().cpu().numpy()).decode("utf-8"),
+                    'features': base64.b64encode(features.detach().cpu().numpy()).decode("utf-8")
+                }
+                features_dict.append(features_info)
 
-            # Append to pycocotools JSON dictionary
-            if save_json:
-                # [{"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}, ...
-                image_id = Path(paths[si]).stem
-                box = pred[:, :4].clone()  # xyxy
-                scale_coords(img[si].shape[1:], box, shapes[si][0], shapes[si][1])  # to original shape
-                box = xyxy2xywh(box)  # xywh
-                box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
-                for p, b in zip(pred.tolist(), box.tolist()):
-                    jdict.append({'image_id': int(image_id) if image_id.split('_')[-1].isnumeric() else image_id,
-                                  'category_id': coco91class[int(p[5])],
-                                  'bbox': [round(x, 3) for x in b],
-                                  'score': round(p[4], 5)})
+            # # Append to pycocotools JSON dictionary
+            # if save_json:
+                # # [{"image_id": 42, "category_id": 18, "bbox": [258.15, 41.29, 348.26, 243.78], "score": 0.236}, ...
+                # image_id = Path(paths[si]).stem
+                # box = pred[:, :4].clone()  # xyxy
+                # scale_coords(img[si].shape[1:], box, shapes[si][0], shapes[si][1])  # to original shape
+                # box = xyxy2xywh(box)  # xywh
+                # box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
+                # for p, b in zip(pred.tolist(), box.tolist()):
+                    # jdict.append({'image_id': int(image_id) if image_id.split('_')[-1].isnumeric() else image_id,
+                                  # 'category_id': coco91class[int(p[5])],
+                                  # 'bbox': [round(x, 3) for x in b],
+                                  # 'score': round(p[4], 5)})
 
-            # Assign all predictions as incorrect
-            correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool, device=device)
-            if nl:
-                detected = []  # target indices
-                tcls_tensor = labels[:, 0]
+            # # Assign all predictions as incorrect
+            # correct = torch.zeros(pred.shape[0], niou, dtype=torch.bool, device=device)
+            # if nl:
+                # detected = []  # target indices
+                # tcls_tensor = labels[:, 0]
 
-                # target boxes
-                tbox = xywh2xyxy(labels[:, 1:5]) * whwh
+                # # target boxes
+                # tbox = xywh2xyxy(labels[:, 1:5]) * whwh
 
-                # Per target class
-                for cls in torch.unique(tcls_tensor):
-                    ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # prediction indices
-                    pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # target indices
+                # # Per target class
+                # for cls in torch.unique(tcls_tensor):
+                    # ti = (cls == tcls_tensor).nonzero(as_tuple=False).view(-1)  # prediction indices
+                    # pi = (cls == pred[:, 5]).nonzero(as_tuple=False).view(-1)  # target indices
 
-                    # Search for detections
-                    if pi.shape[0]:
-                        # Prediction to target ious
-                        ious, i = box_iou(pred[pi, :4], tbox[ti]).max(1)  # best ious, indices
+                    # # Search for detections
+                    # if pi.shape[0]:
+                        # # Prediction to target ious
+                        # ious, i = box_iou(pred[pi, :4], tbox[ti]).max(1)  # best ious, indices
 
-                        # Append detections
-                        for j in (ious > iouv[0]).nonzero(as_tuple=False):
-                            d = ti[i[j]]  # detected target
-                            if d not in detected:
-                                detected.append(d)
-                                correct[pi[j]] = ious[j] > iouv  # iou_thres is 1xn
-                                if len(detected) == nl:  # all targets already located in image
-                                    break
+                        # # Append detections
+                        # for j in (ious > iouv[0]).nonzero(as_tuple=False):
+                            # d = ti[i[j]]  # detected target
+                            # if d not in detected:
+                                # detected.append(d)
+                                # correct[pi[j]] = ious[j] > iouv  # iou_thres is 1xn
+                                # if len(detected) == nl:  # all targets already located in image
+                                    # break
 
-            # Append statistics (correct, conf, pcls, tcls)
-            stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
+            # # Append statistics (correct, conf, pcls, tcls)
+            # stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
-        # Plot images
-        if batch_i < 1:
-            f = Path(save_dir) / ('test_batch%g_gt.jpg' % batch_i)  # filename
-            plot_images(img, targets, paths, str(f), names)  # ground truth
-            f = Path(save_dir) / ('test_batch%g_pred.jpg' % batch_i)
-            plot_images(img, output_to_target(output, width, height), paths, str(f), names)  # predictions
+        # # Plot images
+        # if batch_i < 1:
+            # f = Path(save_dir) / ('test_batch%g_gt.jpg' % batch_i)  # filename
+            # plot_images(img, targets, paths, str(f), names)  # ground truth
+            # f = Path(save_dir) / ('test_batch%g_pred.jpg' % batch_i)
+            # plot_images(img, output_to_target(output, width, height), paths, str(f), names)  # predictions
 
-    # Compute statistics
-    stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
-    if len(stats) and stats[0].any():
-        p, r, ap, f1, ap_class = ap_per_class(*stats)
-        p, r, ap50, ap = p[:, 0], r[:, 0], ap[:, 0], ap.mean(1)  # [P, R, AP@0.5, AP@0.5:0.95]
-        mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
-        nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
-    else:
-        nt = torch.zeros(1)
+    if extract_features:
+        # all_features = torch.cat(features_list, dim=0)
+        # print('allfeaturesshape: ',all_features.shape)
+        print(features_dict[0])
 
-    # Print results
-    pf = '%20s' + '%12.3g' * 6  # print format
-    print(s)
-    print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
+    # # Compute statistics
+    # stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
+    # if len(stats) and stats[0].any():
+        # p, r, ap, f1, ap_class = ap_per_class(*stats)
+        # p, r, ap50, ap = p[:, 0], r[:, 0], ap[:, 0], ap.mean(1)  # [P, R, AP@0.5, AP@0.5:0.95]
+        # mp, mr, map50, map = p.mean(), r.mean(), ap50.mean(), ap.mean()
+        # nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
+    # else:
+        # nt = torch.zeros(1)
 
-    # Print results per class
-    if verbose and nc > 1 and len(stats):
-        for i, c in enumerate(ap_class):
-            print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
+    # # Print results
+    # pf = '%20s' + '%12.3g' * 6  # print format
+    # print(s)
+    # print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
 
-    # Print speeds
-    t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
-    if not training:
-        print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
+    # # Print results per class
+    # if verbose and nc > 1 and len(stats):
+        # for i, c in enumerate(ap_class):
+            # print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 
-    # Save JSON
-    if save_json and len(jdict):
-        f = 'detections_val2014_%s_results.json' % \
-            (weights.split(os.sep)[-1].replace('.pt', '') if isinstance(weights, str) else '')  # filename
-        print('\nCOCO mAP with pycocotools... saving %s...' % f)
-        with open(f, 'w') as file:
-            json.dump(jdict, file)
+    # # Print speeds
+    # t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
+    # if not training:
+        # print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
 
-        # try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
-        from pycocotools.coco import COCO
-        from pycocotools.cocoeval import COCOeval
+    # # Save JSON
+    # if save_json and len(jdict):
+        # f = 'detections_val2014_%s_results.json' % \
+            # (weights.split(os.sep)[-1].replace('.pt', '') if isinstance(weights, str) else '')  # filename
+        # print('\nCOCO mAP with pycocotools... saving %s...' % f)
+        # with open(f, 'w') as file:
+            # json.dump(jdict, file)
 
-        imgIds = [int(Path(x).stem.split('_')[-1]) for x in dataloader.dataset.img_files]
-        cocoGt = COCO(glob.glob('/storage/che011/ICT/fairseq-image-captioning/ms-coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
-        cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
-        cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
-        cocoEval.params.imgIds = imgIds  # image IDs to evaluate
-        cocoEval.evaluate()
-        cocoEval.accumulate()
-        cocoEval.summarize()
-        map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
-        # except Exception as e:
-            # print('ERROR: pycocotools unable to run: %s' % e)
+        # # try:  # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
+        # from pycocotools.coco import COCO
+        # from pycocotools.cocoeval import COCOeval
 
-    # Return results
-    model.float()  # for training
-    maps = np.zeros(nc) + map
-    for i, c in enumerate(ap_class):
-        maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
+        # imgIds = [int(Path(x).stem.split('_')[-1]) for x in dataloader.dataset.img_files]
+        # cocoGt = COCO(glob.glob('/storage/che011/ICT/fairseq-image-captioning/ms-coco/annotations/instances_val*.json')[0])  # initialize COCO ground truth api
+        # cocoDt = cocoGt.loadRes(f)  # initialize COCO pred api
+        # cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+        # cocoEval.params.imgIds = imgIds  # image IDs to evaluate
+        # cocoEval.evaluate()
+        # cocoEval.accumulate()
+        # cocoEval.summarize()
+        # map, map50 = cocoEval.stats[:2]  # update results (mAP@0.5:0.95, mAP@0.5)
+        # # except Exception as e:
+            # # print('ERROR: pycocotools unable to run: %s' % e)
+
+    # # Return results
+    # model.float()  # for training
+    # maps = np.zeros(nc) + map
+    # for i, c in enumerate(ap_class):
+        # maps[c] = ap[i]
+    # return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
 
 
 if __name__ == '__main__':

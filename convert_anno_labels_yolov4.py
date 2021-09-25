@@ -329,15 +329,27 @@ def convert_annotation(data_name, classes, default_path=True, instance_train_fil
             convert_annotation_coco(instance_val_file, classes)
     elif data_name == 'vg':
         convert_annotation_vg(vg_dir, classes)
-			
+        
+def run(mode):
+    if mode == 'vg':
+        yaml_file = '/storage/che011/YOLOv4/PyTorch_YOLOv4/data/vg.yaml'
+        classes = get_classes(yaml_file)
+        vg_dir = '/storage/che011/BUA/VGdata/'
+        save_classes_dict_to_json(vg_dir)
+        convert_annotation('vg', classes)
+        # clean_up_split_files(yaml_file)
+        # for i in range(1,51):
+            # clean_up_label('/storage/che011/BUA/VGdata/labels_with_overlaps/%d.txt' % (i))
+        clean_up_all_label_files(vg_dir)
+    elif mode == 'trainvgtestcoco':
+        yaml_file = '/storage/che011/YOLOv4/PyTorch_YOLOv4/data/vg.yaml'
+        classes = get_classes(yaml_file)
+        vg_dir = '/storage/che011/BUA/VGdata/'
+        save_classes_dict_to_json(vg_dir)
+        convert_annotation('coco', classes)
+    else:
+        print('no such dataset')
+        
 if __name__ == '__main__':
-    yaml_file = '/storage/che011/YOLOv4/PyTorch_YOLOv4/data/vg.yaml'
-    classes = get_classes(yaml_file)
-    vg_dir = '/storage/che011/BUA/VGdata/'
-    save_classes_dict_to_json(vg_dir)
-    convert_annotation('vg', classes)
-    # clean_up_split_files(yaml_file)
-    # for i in range(1,51):
-        # clean_up_label('/storage/che011/BUA/VGdata/labels_with_overlaps/%d.txt' % (i))
-    clean_up_all_label_files(vg_dir)
+    run('trainvgtestcoco')
     
